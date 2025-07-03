@@ -1,10 +1,57 @@
 #include <QTimer>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QFormLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QSpinBox>
 #include <QtWidgets/QVBoxLayout>
+#include <QtWidgets/QWidget>
+
+class SettingsDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    SettingsDialog(int workMinutes, int breakMinutes, QWidget *parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowTitle("Pomodoro Settings");
+        setFixedSize(300, 150);
+
+        QFormLayout *layout = new QFormLayout(this);
+
+        workSpinBox = new QSpinBox;
+        workSpinBox->setRange(1, 120);
+        workSpinBox->setValue(workMinutes);
+        workSpinBox->setSuffix(" minutes");
+
+        breakSpinBox = new QSpinBox;
+        breakSpinBox->setRange(1, 60);
+        breakSpinBox->setValue(breakMinutes);
+        breakSpinBox->setSuffix(" minutes");
+
+        layout->addRow("Work Duration:", workSpinBox);
+        layout->addRow("Break Duration:", breakSpinBox);
+
+        QDialogButtonBox *buttonBox = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        layout->addWidget(buttonBox);
+
+        connect(buttonBox, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    }
+
+    int getWorkMinutes() const { return workSpinBox->value(); }
+    int getBreakMinutes() const { return breakSpinBox->value(); }
+
+private:
+    QSpinBox *workSpinBox;
+    QSpinBox *breakSpinBox;
+};
 
 class PomodoroTimer : public QMainWindow
 {
@@ -65,6 +112,17 @@ private slots:
         startStopBtn->setText("Start");
     }
 
+    void showSettings()
+    {
+        SettingsDialog dialog(workDuration, breakDuration, this);
+        if (dialog.exec() == QDialog::Accepted)
+        {
+            workDuration = dialog.getWorkMinutes();
+            breakDuration = dialog.getBreakMinutes();
+            resetTimer();
+        }
+    }
+
     void resetTimer()
     {
         timer->stop();
@@ -89,6 +147,26 @@ private:
         QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
         mainLayout->setSpacing(15);
         mainLayout->setContentsMargins(20, 20, 20, 20);
+
+        QHBoxLayout *topLayout = new QHBoxLayout;
+        topLayout->addStretch();
+
+        QPushButton *settingsBtn = new QPushButton("⚙");
+        settingsBtn->setFixedSize(30, 30);
+        settingsBtn->setStyleSheet("QPushButton { "
+                                   "border: none; "
+                                   "background-color: #ecf0f1; "
+                                   "border-radius: 15px; "
+                                   "font-size: 16px; "
+                                   "} "
+                                   "QPushButton:hover { "
+                                   "background-color: #bdc3c7; "
+                                   "}");
+        connect(settingsBtn, &QPushButton::clicked, this,
+                &PomodoroTimer::showSettings);
+
+        topLayout->addWidget(settingsBtn);
+        mainLayout->addLayout(topLayout);
 
         statusLabel = new QLabel("Work Session");
         statusLabel->setAlignment(Qt::AlignCenter);
