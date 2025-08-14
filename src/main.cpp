@@ -1,3 +1,4 @@
+// clang-format off
 #include <QTimer>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
@@ -10,47 +11,45 @@
 #include <QtWidgets/QSpinBox>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
+#include <QtWidgets>
+#include <chrono>
+
+using namespace std::chrono_literals;
 
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
-
 public:
     SettingsDialog(int workMinutes, int breakMinutes, QWidget *parent = nullptr)
         : QDialog(parent)
     {
-        setWindowTitle("Pomodoro Settings");
-        setFixedSize(300, 150);
+        setWindowTitle(tr("Pomodoro Settings"));
 
-        QFormLayout *layout = new QFormLayout(this);
+        auto *layout = new QFormLayout(this);
 
-        workSpinBox = new QSpinBox;
-        workSpinBox->setRange(1, 120);
-        workSpinBox->setValue(workMinutes);
-        workSpinBox->setSuffix(" minutes");
+        workSpin_ = new QSpinBox(this);
+        breakSpin_ = new QSpinBox(this);
+        workSpin_->setRange(1, 120);
+        breakSpin_->setRange(1, 60);
+        workSpin_->setSuffix(tr(" min"));
+        breakSpin_->setSuffix(tr(" min"));
+        workSpin_->setValue(workMinutes);
+        breakSpin_->setValue(breakMinutes);
 
-        breakSpinBox = new QSpinBox;
-        breakSpinBox->setRange(1, 60);
-        breakSpinBox->setValue(breakMinutes);
-        breakSpinBox->setSuffix(" minutes");
+        layout->addRow(tr("Work duration:"), workSpin_);
+        layout->addRow(tr("Break duration:"), breakSpin_);
 
-        layout->addRow("Work Duration:", workSpinBox);
-        layout->addRow("Break Duration:", breakSpinBox);
-
-        QDialogButtonBox *buttonBox = new QDialogButtonBox(
-            QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-        layout->addWidget(buttonBox);
-
-        connect(buttonBox, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        auto *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        connect(box, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(box);
     }
 
-    int getWorkMinutes() const { return workSpinBox->value(); }
-    int getBreakMinutes() const { return breakSpinBox->value(); }
+    [[nodiscard]] int workMinutes() const { return workSpin_->value(); }
+    [[nodiscard]] int breakMinutes() const { return breakSpin_->value(); }
 
 private:
-    QSpinBox *workSpinBox;
-    QSpinBox *breakSpinBox;
+    QSpinBox *workSpin_{}, *breakSpin_{};
 };
 
 class PomodoroTimer : public QMainWindow
@@ -59,194 +58,229 @@ class PomodoroTimer : public QMainWindow
 public:
     PomodoroTimer(QWidget *parent = nullptr) : QMainWindow(parent)
     {
-        setWindowTitle("Pomodoro Timer");
-        setFixedSize(450, 400);
-        setUpUI();
-        setupTimer();
-        resetTimer();
+        setWindowTitle(tr("Pomodoro Timer"));
+        buildUi();
+        restoreSettings();
+        connect(&timer_, &QTimer::timeout, this, &PomodoroTimer::onTick);
+        updateUi();
     }
 
-private slots:
-    void toggleTimer()
+    ~PomodoroTimer() override { saveSettings(); }
+
+private:
+    enum class Phase
     {
-        if (timer->isActive())
+        Work,
+        Break
+    };
+
+    // ----- UI -----
+    QLabel *statusLabel_{};
+    QLabel *timerLabel_{};
+    QPushButton *startPause_{};
+    QAction *actStartPause_{};
+    QAction *actReset_{};
+    QAction *actSettings_{};
+
+    // ----- State -----
+    Phase phase_{Phase::Work};
+    int workSecs_{25 * 60};
+    int breakSecs_{5 * 60};
+    qint64 targetMs_{0};
+    bool running_{false};
+    QTimer timer_;
+    QElapsedTimer monotonic_;
+
+    // ----- UI construction -----
+    void buildUi()
+    {
+        auto *central = new QWidget(this);
+        auto *main = new QVBoxLayout(central);
+        main->setSpacing(15);
+        main->setContentsMargins(20, 20, 20, 20);
+
+        auto *top = new QHBoxLayout;
+        top->addStretch();
+        auto *settingsBtn = new QPushButton(QStringLiteral("⚙"), central);
+        settingsBtn->setFixedSize(30, 30);
+        settingsBtn->setToolTip(tr("Settings"));
+        settingsBtn->setCursor(Qt::PointingHandCursor);
+        settingsBtn->setStyleSheet("QPushButton{border:none;background:#ecf0f1;"
+                                   "border-radius:15px;font-size:16px}"
+                                   "QPushButton:hover{background:#bdc3c7}");
+        connect(settingsBtn, &QPushButton::clicked, this, &PomodoroTimer::openSettings);
+        top->addWidget(settingsBtn);
+        main->addLayout(top);
+
+        statusLabel_ = new QLabel(central);
+        statusLabel_->setAlignment(Qt::AlignCenter);
+        statusLabel_->setStyleSheet("font-weight:bold;font-size:18px");
+        main->addWidget(statusLabel_);
+
+        timerLabel_ = new QLabel(central);
+        timerLabel_->setAlignment(Qt::AlignCenter);
+        timerLabel_->setStyleSheet(
+            "font-size:72px;font-weight:bold;color:#2c3e50;"
+            "background:#ecf0f1;border-radius:20px;padding:40px");
+        main->addWidget(timerLabel_);
+
+        auto *buttons = new QHBoxLayout;
+
+        startPause_ = new QPushButton(tr("Start"), central);
+        startPause_->setFixedHeight(50);
+        startPause_->setStyleSheet(
+            "QPushButton{background:#27ae60;color:white;border:none;border-"
+            "radius:8px;font-size:16px;font-weight:bold}"
+            "QPushButton:hover{background:#229954}"
+            "QPushButton:pressed{background:#1e8449}");
+        connect(startPause_, &QPushButton::clicked, this, &PomodoroTimer::toggle);
+
+        auto *reset = new QPushButton(tr("Reset"), central);
+        reset->setFixedHeight(50);
+        reset->setStyleSheet(
+            "QPushButton{background:#e74c3c;color:white;border:none;border-"
+            "radius:8px;font-size:16px;font-weight:bold}"
+            "QPushButton:hover{background:#c0392b}"
+            "QPushButton:pressed{background:#a93226}");
+        connect(reset, &QPushButton::clicked, this, &PomodoroTimer::reset);
+
+        buttons->addWidget(startPause_);
+        buttons->addWidget(reset);
+        main->addLayout(buttons);
+        main->addStretch();
+
+        setCentralWidget(central);
+
+        actStartPause_ = new QAction(tr("Start/Pause"), this);
+        actReset_ = new QAction(tr("Reset"), this);
+        actSettings_ = new QAction(tr("Settings…"), this);
+        actSettings_->setShortcut(QKeySequence::Preferences);
+        addAction(actStartPause_);
+        addAction(actReset_);
+        addAction(actSettings_);
+        actStartPause_->setShortcut(Qt::Key_Space);
+        actReset_->setShortcut(Qt::Key_R);
+        connect(actStartPause_, &QAction::triggered, this, &PomodoroTimer::toggle);
+        connect(actReset_, &QAction::triggered, this, &PomodoroTimer::reset);
+        connect(actSettings_, &QAction::triggered, this, &PomodoroTimer::openSettings);
+    }
+
+    // ----- Behavior -----
+    void start()
+    {
+        running_ = true;
+        timer_.start(1s);
+        if (targetMs_ <= 0) setTargetFromNow(remainingForPhase());
+        startPause_->setText(tr("Pause"));
+    }
+
+    void pause()
+    {
+        running_ = false;
+        timer_.stop();
+        auto rem = remainingMs();
+        targetMs_ = QDateTime::currentMSecsSinceEpoch() + rem;
+        startPause_->setText(tr("Start"));
+        updateUi();
+    }
+
+    void toggle() { running_ ? pause() : start(); }
+
+    void reset()
+    {
+        timer_.stop();
+        running_ = false;
+        targetMs_ = 0;
+        startPause_->setText(tr("Start"));
+        updateUi(true);
+    }
+
+    void openSettings()
+    {
+        SettingsDialog dlg(workSecs_ / 60, breakSecs_ / 60, this);
+        if (dlg.exec() == QDialog::Accepted)
         {
-            timer->stop();
-            startStopBtn->setText("Start");
+            workSecs_ = dlg.workMinutes() * 60;
+            breakSecs_ = dlg.breakMinutes() * 60;
+            reset();
+        }
+    }
+
+    void onTick()
+    {
+        if (remainingMs() <= 0)
+        {
+            timer_.stop();
+            running_ = false;
+            switchPhase();
+            updateUi(true);
+            startPause_->setText(tr("Start"));
         }
         else
         {
-            timer->start(1000);
-            startStopBtn->setText("Pause");
+            updateUi();
         }
     }
 
-    void updateDisplay()
+    void switchPhase()
     {
-        remainingTime--;
-
-        int minutes = remainingTime / 60;
-        int seconds = remainingTime % 60;
-
-        timerLabel->setText(QString("%1:%2")
-                                .arg(minutes, 2, 10, QChar('0'))
-                                .arg(seconds, 2, 10, QChar('0')));
-
-        if (remainingTime <= 0)
-        {
-            timer->stop();
-            onTimerFinished();
-        }
+        phase_ = (phase_ == Phase::Work) ? Phase::Break : Phase::Work;
+        targetMs_ = 0;
     }
 
-    void onTimerFinished()
+    int remainingForPhase() const
     {
-        isWorkSession = !isWorkSession;
-        statusLabel->setText(isWorkSession ? "Work Session" : "Break Time");
-        statusLabel->setStyleSheet(
-            isWorkSession
-                ? "color: #e74c3c; font-weight: bold; font-size: 18px;"
-                : "color: #27ae60; font-weight: bold; font-size: 18px;");
-
-        resetTimer();
-        startStopBtn->setText("Start");
+        return (phase_ == Phase::Work) ? workSecs_ : breakSecs_;
     }
 
-    void showSettings()
+    qint64 remainingMs() const
     {
-        SettingsDialog dialog(workDuration, breakDuration, this);
-        if (dialog.exec() == QDialog::Accepted)
-        {
-            workDuration = dialog.getWorkMinutes();
-            breakDuration = dialog.getBreakMinutes();
-            resetTimer();
-        }
+        if (targetMs_ <= 0) return remainingForPhase() * 1000LL;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        return std::max<qint64>(0, targetMs_ - now);
     }
 
-    void resetTimer()
+    void setTargetFromNow(int seconds)
     {
-        timer->stop();
-        remainingTime = isWorkSession ? workDuration * 60 : breakDuration * 60;
-
-        int minutes = remainingTime / 60;
-        int seconds = remainingTime % 60;
-
-        timerLabel->setText(QString("%1:%2")
-                                .arg(minutes, 2, 10, QChar('0'))
-                                .arg(seconds, 2, 10, QChar('0')));
-
-        startStopBtn->setText("Start");
+        targetMs_ = QDateTime::currentMSecsSinceEpoch() + qint64(seconds) * 1000;
+        monotonic_.restart();
     }
 
-private:
-    void setUpUI()
+    static QString formatSecs(int secs)
     {
-        QWidget *centralWidget = new QWidget;
-        setCentralWidget(centralWidget);
-
-        QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
-        mainLayout->setSpacing(15);
-        mainLayout->setContentsMargins(20, 20, 20, 20);
-
-        QHBoxLayout *topLayout = new QHBoxLayout;
-        topLayout->addStretch();
-
-        QPushButton *settingsBtn = new QPushButton("⚙");
-        settingsBtn->setFixedSize(30, 30);
-        settingsBtn->setStyleSheet("QPushButton { "
-                                   "border: none; "
-                                   "background-color: #ecf0f1; "
-                                   "border-radius: 15px; "
-                                   "font-size: 16px; "
-                                   "} "
-                                   "QPushButton:hover { "
-                                   "background-color: #bdc3c7; "
-                                   "}");
-        connect(settingsBtn, &QPushButton::clicked, this,
-                &PomodoroTimer::showSettings);
-
-        topLayout->addWidget(settingsBtn);
-        mainLayout->addLayout(topLayout);
-
-        statusLabel = new QLabel("Work Session");
-        statusLabel->setAlignment(Qt::AlignCenter);
-        statusLabel->setStyleSheet(
-            "color: #e74c3c; font-weight: bold; font-size: 18px;");
-        mainLayout->addWidget(statusLabel);
-
-        timerLabel = new QLabel("25:00");
-        timerLabel->setAlignment(Qt::AlignCenter);
-        timerLabel->setStyleSheet("font-size: 72px; "
-                                  "font-weight: bold; "
-                                  "color: #2c3e50; "
-                                  "background-color: #ecf0f1; "
-                                  "border-radius: 20px; "
-                                  "padding: 40px; ");
-        mainLayout->addWidget(timerLabel);
-
-        QHBoxLayout *buttonLayout = new QHBoxLayout;
-
-        startStopBtn = new QPushButton("Start");
-        startStopBtn->setFixedHeight(50);
-        startStopBtn->setStyleSheet("QPushButton { "
-                                    "background-color: #27ae60; "
-                                    "color: white; "
-                                    "border: none; "
-                                    "border-radius: 8px; "
-                                    "font-size: 16px; "
-                                    "font-weight: bold; "
-                                    "} "
-                                    "QPushButton:hover { "
-                                    "background-color: #229954;"
-                                    "} "
-                                    "QPushButton:pressed { "
-                                    "background-color: #1e8449; "
-                                    "} ");
-
-        connect(startStopBtn, &QPushButton::clicked, this,
-                &PomodoroTimer::toggleTimer);
-
-        QPushButton *resetBtn = new QPushButton("Reset");
-        resetBtn->setFixedHeight(50);
-        resetBtn->setStyleSheet("QPushButton { "
-                                "background-color: #e74c3c; "
-                                "color: white; "
-                                "border: none; "
-                                "border-radius: 8px; "
-                                "font-size: 16px; "
-                                "font-weight: bold; "
-                                "} "
-                                "QPushButton:hover { "
-                                "background-color: #c0392b; "
-                                "} "
-                                "QPushButton:pressed { "
-                                "background-color: #a93226; "
-                                "}");
-
-        connect(resetBtn, &QPushButton::clicked, this,
-                &PomodoroTimer::resetTimer);
-
-        buttonLayout->addWidget(startStopBtn);
-        buttonLayout->addWidget(resetBtn);
-        mainLayout->addLayout(buttonLayout);
-        mainLayout->addStretch();
+        if (secs < 0) secs = 0;
+        return QTime(0, 0).addSecs(secs).toString("mm:ss");
     }
 
-    void setupTimer()
+    void updateUi(bool resetPhaseToFull = false)
     {
-        timer = new QTimer(this);
-        connect(timer, &QTimer::timeout, this, &PomodoroTimer::updateDisplay);
+        if (resetPhaseToFull) setTargetFromNow(remainingForPhase());
+        const int secs = int((remainingMs() + 500) / 1000);
+        timerLabel_->setText(formatSecs(secs));
+
+        const bool isWork = (phase_ == Phase::Work);
+        statusLabel_->setText(isWork ? tr("Work Session") : tr("Break Time"));
+        statusLabel_->setStyleSheet(
+            isWork ? "color:#e74c3c;font-weight:bold;font-size:18px"
+                   : "color:#27ae60;font-weight:bold;font-size:18px");
     }
 
-    QTimer *timer;
-    QLabel *timerLabel;
-    QLabel *statusLabel;
-    QPushButton *startStopBtn;
+    // ----- Settings persistence -----
+    void restoreSettings()
+    {
+        QSettings s("YourOrg", "PomodoroQt");
+        workSecs_ = s.value("workSecs", 25 * 60).toInt();
+        breakSecs_ = s.value("breakSecs", 5 * 60).toInt();
+        restoreGeometry(s.value("geom").toByteArray());
+    }
 
-    int workDuration = 25;
-    int breakDuration = 5;
-    int remainingTime = 0;
-    bool isWorkSession = true;
+    void saveSettings()
+    {
+        QSettings s("YourOrg", "PomodoroQt");
+        s.setValue("workSecs", workSecs_);
+        s.setValue("breakSecs", breakSecs_);
+        s.setValue("geom", saveGeometry());
+    }
 };
 
 int main(int argc, char **argv)
